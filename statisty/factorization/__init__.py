@@ -1,0 +1,1 @@
+from statisty.factorization.fa import FA
