@@ -2,10 +2,20 @@
 A simple progress bar to monitor MCMC sampling progress.
 Modified from original code by Corey Goldberg (2010), and pymc code.
 """
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+from __future__ import absolute_import
+from future.builtins import super
+from future.builtins import int
+from future.builtins import round
+from future import standard_library
+standard_library.install_hooks()
 
 import sys
 import time
 import uuid
+from statisty.utils import is_ipython
 try:
     from IPython.core.display import HTML, Javascript, display
 except ImportError:
@@ -77,16 +87,8 @@ def ipythonprint(s):
     print('\r', s, end='')
     sys.stdout.flush()
 
-def run_from_ipython():
-    try:
-        __IPYTHON__
-        return True
-    except NameError:
-        return False
-
-
 def progress_bar(iters):
-    if run_from_ipython():
+    if is_ipython():
         return TextProgressBar(iters, ipythonprint)
     else:
         return TextProgressBar(iters, consoleprint)

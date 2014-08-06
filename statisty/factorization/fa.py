@@ -1,3 +1,14 @@
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+from __future__ import absolute_import
+from future.builtins import zip
+from future.builtins import int
+from future.builtins import range
+from future.builtins import map
+from future.builtins import str
+from future import standard_library
+standard_library.install_hooks()
 import numpy as np
 import numpy.linalg as la
 import scipy as sp
@@ -6,22 +17,35 @@ import scipy.optimize
 import pandas as pd
 
 import statisty as st
-import statisty.utils
+import statisty.utils as utils
 from statisty.utils import RoseTable
 import statisty.factorization.rotation
+
+import collections
 
 import time
 import multiprocessing as mp
 import functools
 
-from sklearn.decomposition import FastICA
+ConfidenceInterval = collections.namedtuple('ConfidenceInterval',
+                                            ['mean', 'std', 'lower', 'upper',
+                                             'p'])
 
 def bootstrap_worker(parameters, no):
     resampled = parameters['fa_options'][0][np.random.randint(0, parameters['n_obs'],
                                                   parameters['n_obs']), :]
-    fa = FA(*parameters['fa_options']).fit(calc_statistics = False)
+    n_factors = parameters['fa_options'][4]
+    new_parameters = parameters.copy()
+    new_parameters['fa_options'][0] = resampled
+    fa = FA(*new_parameters['fa_options']).fit(calc_statistics = False)
 
-    return fa.loadings
+    if n_factors > 1:
+        loadings, rotation, Phi = utils.target_rotation(
+            fa.loadings, parameters['loadings'])
+        if fa.Phi is not None:
+            return loadings, np.tril(fa.Phi)
+
+    return fa.loadings.copy(), None
 
 class FA(object):
     """
@@ -31,14 +55,14 @@ class FA(object):
         self.iscov = False
         self.pairwise_obs = None
         self.variable_names = None
-        
+
         try:
             self.X = X.as_matrix() # When X is pd.DataFrame
-            self.pairwise_obs = st.utils.pairwise_count(self.X)
+            self.pairwise_obs = utils.pairwise_count(self.X)
             self.n_obs = self.X.shape[0]
             self.cor = np.corrcoef(X, rowvar = 0)
             self.variable_names = X.columns.values.tolist()
-            
+
         except AttributeError:
             if cov is not None:
                 self.cor = cov
@@ -57,13 +81,13 @@ class FA(object):
                         raise ValueError('The number of observations should'
                                          ' specified when using covariance'
                                          ' matrix for analysis')
-                        
+
                     self.n_obs = n_obs
 
                 else:
                     if isinstance(X, np.ndarray):
                         self.X = X
-                        self.pairwise_obs = st.utils.pairwise_count(self.X)
+                        self.pairwise_obs = utils.pairwise_count(self.X)
                         self.cor = np.corrcoef(X, rowvar = 0)
                         self.n_obs = self.X.shape[0]
 
@@ -71,22 +95,24 @@ class FA(object):
                         raise ValueError('Raw dataframe, or raw data matrix'
                                          ' or covariance/correlation matrix'
                                          ' should be given for analysis')
-                        
+
         self.n_var = self.cor.shape[1]
         self.n_factors = n_factors
         self.conf_int = conf_int
         self.rotate = rotate
-        
+
         self.lower = .001
 
         self.method = method
         self.method_fit = {'ml': self._fa_ml}
         self.method_rotate = {'oblimin': st.factorization.rotation.oblimin}
-        
+
+        self.loadings = None
+
     def fit(self, calc_statistics = True):
-        #self.start = (1 - 0.5 * self.n_factors / self.n_var) / \
+        # self.start = (1 - 0.5 * self.n_factors / self.n_var) / \
         #             np.diag(la.inv(self.cor))
-        self.start = np.diag(self.cor) - st.utils.SMC(self.cor)
+        self.start = np.diag(self.cor) - utils.SMC(self.cor)
         self.method_fit[self.method]()
 
         self._sort_loadings()
@@ -94,13 +120,14 @@ class FA(object):
         model = self.loadings.dot(self.loadings.T)
 
         try:
-            rotated_result = self.method_rotate[self.rotate](self.loadings, 0, False, 1e-5, 1000)
+            rotated_result = self.method_rotate[self.rotate](
+                self.loadings, 0, False, 1e-5, 1000)
             self.isrotated = True
             self.loadings = rotated_result.loadings
             self.Phi = rotated_result.Phi
             sign = self._sort_loadings()
             self.Phi = np.diag(sign).dot(self.Phi).dot(np.diag(sign))
-            
+
         except KeyError:
             self.isrotated = False
             self.Phi = None
@@ -124,32 +151,69 @@ class FA(object):
 
         return self
 
-    def bootstrap(self, niter = 100, njobs = -1):
-        self.replicates = np.empty((niter, self.n_var, self.n_factors))
-        self.replicate_rotations = None
+    def bootstrap(self, niter = 100, njobs = -1, p = .05):
+        if self.loadings is None:
+            self.fit()
+        
+        replicates = np.empty((niter, self.n_var, self.n_factors))
+        replicates_Phi = np.empty((niter, self.n_factors, self.n_factors))
 
-        global parameter
         parameter = {'n_obs': self.n_obs,
+                     'loadings': self.loadings,
                      'fa_options': [self.X, None, None, self.n_obs,
                                     self.n_factors, self.rotate, self.conf_int,
                                     self.method]}
-
+        start = time.time()
+        worker = functools.partial(bootstrap_worker, parameter)
+        progress = utils.progress_bar(niter)
+        
         if njobs == -1:
             jobs = mp.cpu_count()
 
         else:
             jobs = njobs
 
-        p = mp.Pool(jobs)
-        
-        start = time.time()
-        prog_start = time.time()
-        worker = functools.partial(bootstrap_worker, parameter)
-        progress = st.utils.progress_bar(niter)
+        pool = mp.Pool(jobs)
 
-        for i, loadings in enumerate(p.imap_unordered(worker, range(niter))):
+        for i, results in enumerate(pool.imap_unordered(worker, range(niter))):
             progress.update(i)
-            self.replicates[i] = loadings
+            replicates[i], replicates_Phi[i] = results
+
+        pool.close()
+
+        ppf_l = sp.stats.norm.ppf(p / 2)
+        ppf_u = sp.stats.norm.ppf(1 - p / 2)
+
+        ci_mean = np.mean(replicates, axis = 0)
+        ci_std = np.std(replicates, axis = 0)
+        tci = np.abs(ci_mean) / ci_std
+        ptci = 1 - sp.stats.norm.cdf(tci)
+
+        if replicates_Phi[0] is not None:
+            rot_mean = np.mean(replicates_Phi, axis = 0)
+            rot_std = np.std(replicates_Phi, axis = 0)
+            rot_lower = rot_mean + ppf_l * rot_std
+            rot_upper = rot_mean + ppf_u * rot_std
+            rot_tci = np.abs(rot_mean) / rot_std
+            rot_ptci = 1 - sp.stats.norm.cdf(rot_tci)
+
+            self.ci_rotation = ConfidenceInterval(
+                mean = rot_mean, std = rot_std,
+                p = 2 * rot_tci,
+                lower = rot_mean + ppf_l * rot_std,
+                upper = rot_mean + ppf_u * rot_std)
+
+        else:
+            self.ci_rotation = None
+
+        self.ci_loadings = ConfidenceInterval(
+            mean = ci_mean, std = ci_std,
+            p = 2 * ptci,
+            lower = ci_mean + ppf_l * ci_std,
+            upper = ci_mean + ppf_u * ci_std)
+
+        self.bootstrapped = True
+        
         end = time.time()
 
     def _fa_stats(self):
@@ -172,7 +236,8 @@ class FA(object):
         X2 = np.sum(X ** 2)
         Xstar2 = np.sum(residual ** 2)
 
-        self.dof = var * (var - 1) / 2 - var * n_factors + (n_factors * (n_factors - 1) / 2)
+        self.dof = var * (var - 1) / 2 - var * n_factors + (
+            n_factors * (n_factors - 1) / 2)
         X2_off = X2 - np.trace(X)
         np.fill_diagonal(residual, 0)
 
@@ -188,14 +253,15 @@ class FA(object):
             X2_off = (X * X * pairwise_obs)
             X2_off = np.sum(X2_off) - np.trace(X2_off)
             self.chi = Xstar_off
-            self.harmonic = st.utils.harmonic_mean(np.hstack(pairwise_obs.T))
+            self.harmonic = utils.harmonic_mean(np.hstack(pairwise_obs.T))
             self.rms = np.sqrt(Xstar_off / (self.harmonic * var * (var - 1)))
 
             if self.dof > 0:
                 self.EPVAL = sp.stats.chi2.sf(self.chi, self.dof)
                 self.crms = np.sqrt(Xstar_off / (2 * self.harmonic * self.dof))
                 self.EBIC = self.chi - self.dof * np.log(obs)
-                self.ESABIC = self.chi - self.dof * np.log((self.harmonic + 2) / 24)
+                self.ESABIC = self.chi - self.dof * np.log(
+                    (self.harmonic + 2) / 24)
 
             else:
                 self.EPVAL = None
@@ -209,8 +275,8 @@ class FA(object):
         self.complexity = np.apply_along_axis(lambda x: np.sum(x ** 2), 1, loadings) ** 2 \
                                / np.apply_along_axis(lambda x: np.sum(x ** 4), 1, loadings)
         model[np.diag_indices_from(model)] = np.diag(X)
-        model = st.utils.smooth_corrcoef(model)
-        X = st.utils.smooth_corrcoef(X)
+        model = utils.smooth_corrcoef(model)
+        X = utils.smooth_corrcoef(X)
         model_inv = la.solve(model, X)
         self.objective = np.sum(np.diag(model_inv)) - np.log(la.det(model_inv)) - var
         chisq = self.objective * ((obs - 1) - (2 * var + 5) / 6 - (2 * n_factors) / 3)
@@ -291,8 +357,8 @@ class FA(object):
 
         except la.LinAlgError:
             print('Correlation matrix is singular; approximation used')
-            
-            eigval, eigvec = st.utils.eigenh_sorted(X)
+
+            eigval, eigvec = utils.eigenh_sorted(X)
             if np.sum(np.iscomplex()) == 0:
                 print('Complex eigenvalues are detected. results are suspect.')
 
@@ -320,10 +386,10 @@ class FA(object):
             print('The estimated weights for the factor scores are probably incorrect.'
                   'Try a different factor extraction method.')
 
-        self.Rscores = st.utils.cov_to_cor(W.T.dot(X).dot(W))
+        self.Rscores = utils.cov_to_cor(W.T.dot(X).dot(W))
         self.R2 = R2
 
-        keys = st.utils.factor_to_cluster(loadings)
+        keys = utils.factor_to_cluster(loadings)
         covar = keys.T.dot(X).dot(keys)
 
         if n_factors > 1 and covar.shape[1] > 1:
@@ -358,8 +424,15 @@ class FA(object):
 
         else:
             var_names = self.variable_names
-            
-        load_header = fac_header.copy()
+
+        load_header = ['']
+        if self.bootstrapped:
+            for header in fac_header[1:]:
+                load_header.append('[low')
+                load_header.append(header)
+                load_header.append('up]')
+        else:
+            load_header = fac_header.copy()
         load_header.extend(['h2', 'uniq', 'com'])
 
         x = RoseTable()
@@ -407,7 +480,11 @@ class FA(object):
         temp.extend(['Fit upon off diagonal:', '{:10.2f}'.format(self.fit_off)])
         x.add_row(temp)
 
-        x.add_header(load_header, align = ['l'] + ['r'] * (n_factors + 3))
+        if self.bootstrapped:
+            x.add_header(load_header, align = ['l'] + ['r'] * (n_factors * 3 + 3))
+            #x.add_header(load_header, align = ['l'] + ['l', 'r', 'r'] * n_factors + ['r'] * 3)
+        else:
+            x.add_header(load_header, align = ['l'] + ['r'] * (n_factors + 3))
 
         if self.n_factors > 1:
             if self.isrotated:
@@ -415,20 +492,38 @@ class FA(object):
 
             else:
                 h2 = np.sum(loadings ** 2, axis = 1)
-            
+
         else:
             h2 = loadings ** 2
-        
+
         var_total = np.sum(h2 + self.uniqueness)
-        
-        for row in zip(var_names, loadings, h2, self.uniqueness, self.complexity):
+
+        if self.bootstrapped:
+            zip_load = zip(var_names, loadings, h2,
+                           self.uniqueness, self.complexity,
+                           self.ci_loadings.lower, self.ci_loadings.upper)
+        else:
+            zip_load = zip(var_names, loadings, h2,
+                           self.uniqueness, self.complexity)
+
+        for row in zip_load:
             temp_row = [row[0]]
             row[1][np.abs(row[1]) < loading_threshold] = 0
-            thresholded = ['{:10.2f}'.format(i) if i != 0 else '' for i in row[1]]
-            temp_row.extend(thresholded)
-            temp_row.append("{:10.3f}".format(row[2]))
-            temp_row.append("{:10.2f}".format(row[3]))
-            temp_row.append("{:10.1f}".format(row[4]))
+            thresholded = ['{:3.2f}'.format(i) if i != 0 else '' for i in row[1]]
+            if self.bootstrapped:
+                row[5][np.abs(row[5]) < loading_threshold] = 0
+                row[6][np.abs(row[6]) < loading_threshold] = 0
+                for i, val in enumerate(thresholded):
+                    temp_row.append('{:3.2f}'.format(
+                        row[5][i]) if val != '' else '')
+                    temp_row.append(val)
+                    temp_row.append('{:3.2f}'.format(
+                        row[6][i]) if val != '' else '')
+            else:
+                temp_row.extend(thresholded)
+            temp_row.append("{:3.3f}".format(row[2]))
+            temp_row.append("{:3.2f}".format(row[3]))
+            temp_row.append("{:3.1f}".format(row[4]))
             x.add_row(temp_row)
 
         x.add_header(fac_header,
@@ -444,11 +539,11 @@ class FA(object):
         else:
             ss_load = np.diag(self.Phi.dot(loadings.T).dot(loadings))
 
-        var_header = [['SS loadings', map(lambda x: "{:10.2f}".format(x), ss_load)],
-                      ['Proportion Var', map(lambda x: "{:10.2f}".format(x), ss_load / var_total)],
-                      ['Cumulative Var', map(lambda x: "{:10.2f}".format(x), np.cumsum(ss_load / var_total))],
-                      ['Proportion Explained', map(lambda x: "{:10.2f}".format(x), ss_load / np.sum(ss_load))],
-                      ['Cumulative Proportion', map(lambda x: "{:10.2f}".format(x),
+        var_header = [['SS loadings', map(lambda x: "{:3.2f}".format(x), ss_load)],
+                      ['Proportion Var', map(lambda x: "{:3.2f}".format(x), ss_load / var_total)],
+                      ['Cumulative Var', map(lambda x: "{:3.2f}".format(x), np.cumsum(ss_load / var_total))],
+                      ['Proportion Explained', map(lambda x: "{:3.2f}".format(x), ss_load / np.sum(ss_load))],
+                      ['Cumulative Proportion', map(lambda x: "{:3.2f}".format(x),
                                                     np.cumsum(ss_load / np.sum(ss_load)))]
         ]
 
@@ -459,24 +554,45 @@ class FA(object):
 
         if self.isrotated:
             corr_header = fac_header.copy()
+            
+
+            corr_header = ['']
+            if self.bootstrapped:
+                for header in fac_header[1:]:
+                    corr_header.append('[low')
+                    corr_header.append(header)
+                    corr_header.append('up]')
+            else:
+                corr_header = fac_header.copy()
             if self.method == 'paf':
                 corr_header[0] = 'Component correlations'
 
             else:
                 corr_header[0] = 'Factor correlations'
 
-            x.add_header(corr_header, align = ['l'] + ['r'] * (n_factors))
-            for index, row in enumerate(corr_header[1:]):
-                temp_row = [row]
-                correlations = list(map(lambda x: "{:10.2f}".format(x), self.Phi[index, :]))
-                temp_row.extend(correlations[:index + 1])
+            if self.bootstrapped:
+                x.add_header(corr_header, align = ['l'] + ['r'] * (n_factors))
+
+            else:
+                x.add_header(corr_header, align = ['l'] + ['r'] * (n_factors * 3))
+                
+            for index in range(n_factors):
+                temp_row = [corr_header[index + 1]]
+                correlations = list(map(lambda x: "{:4.2f}".format(x), self.Phi[index, :]))
+                if self.bootstrapped and self.ci_rotation is not None:
+                    for i, val in enumerate(correlations[:index + 1]):
+                        temp_row.append('{:4.2f}'.format(self.ci_rotation.lower[index, i]))
+                        temp_row.append(val)
+                        temp_row.append('{:4.2f}'.format(self.ci_rotation.upper[index, i]))
+                else:
+                    temp_row.extend(correlations[:index + 1])
                 x.add_row(temp_row)
 
 
         if self.method != 'paf':
-            measure_row = [['Corr. of scores with factors', map(lambda x: "{:10.2f}".format(x), np.sqrt(self.R2))],
-                           ['Multiple R^2 of scores with factors', map(lambda x: "{:10.2f}".format(x), self.R2)],
-                           ['Min. Corr. of possible factor scores', map(lambda x: "{:10.2f}".format(x),
+            measure_row = [['Corr. of scores with factors', map(lambda x: "{:3.2f}".format(x), np.sqrt(self.R2))],
+                           ['Multiple R^2 of scores with factors', map(lambda x: "{:3.2f}".format(x), self.R2)],
+                           ['Min. Corr. of possible factor scores', map(lambda x: "{:3.2f}".format(x),
                                                                         2 * self.R2 - 1)],
             ]
             measure_header = fac_header.copy()
@@ -506,10 +622,10 @@ class FA(object):
         def ml_out(Psi, S, q):
             sc = np.diag(1 / np.sqrt(Psi))
             Sstar = sc.dot(S).dot(sc)
-            eig_val, eig_vec = st.utils.eigenh_sorted(Sstar)
+            eig_val, eig_vec = utils.eigenh_sorted(Sstar)
             L = eig_vec[:, :q]
             load = L.dot(np.diag(np.sqrt(np.maximum(eig_val[:q] - 1, 0))))
-        
+
             return np.diag(np.sqrt(Psi)).dot(load)
 
         def ml_function(Psi, S, q):
@@ -520,24 +636,24 @@ class FA(object):
             eig_val = eig_val[::-1]
             e = eig_val[-(eig_val.shape[0] - q):]
             e = np.sum(np.log(e) - e) - q + S.shape[0]
-        
+
             return -e
 
         def ml_gradient(Psi, S, q):
             sc = np.diag(1 / np.sqrt(Psi))
             Sstar = sc.dot(S).dot(sc)
-            eig_val, eig_vec = st.utils.eigenh_sorted(Sstar)
+            eig_val, eig_vec = utils.eigenh_sorted(Sstar)
             L = eig_vec[:, :q]
             load = L.dot(np.diag(np.sqrt(np.maximum(eig_val[:q] - 1, 0))))
             load = np.diag(np.sqrt(Psi)).dot(load)
             g = load.dot(load.T) + np.diag(Psi) - S
-        
+
             return np.diag(g) / (Psi ** 2)
-        
+
         result = sp.optimize.minimize(ml_function, self.start,
                                       args = (self.cor, self.n_factors),
                                       method = 'L-BFGS-B', jac = ml_gradient,
                                       bounds = [(self.lower, 1)] * self.n_var)
-        
+
         self.loadings = ml_out(result.x, self.cor, self.n_factors)
         self.parameter = result.x

@@ -1,3 +1,10 @@
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+from __future__ import absolute_import
+from future.builtins import range
+from future import standard_library
+standard_library.install_hooks()
 import numpy as np
 import numpy.linalg as la
 
@@ -69,7 +76,7 @@ def oblimin(X, gamma = 0, normalize = False, eps = 1e-5, max_iter = 1000):
         sqrt_inter = np.sqrt(np.sum(np.diag(inter2.T.dot(inter2))))
 
         record = np.array([i, obli_sum, np.log10(sqrt_inter), al])
-        if table == None:
+        if table is None:
             table = record
 
         else:

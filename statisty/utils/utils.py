@@ -1,3 +1,10 @@
+from __future__ import division
+from __future__ import unicode_literals
+from __future__ import print_function
+from __future__ import absolute_import
+from future.builtins import range
+from future import standard_library
+standard_library.install_hooks()
 import numpy as np
 import numpy.linalg as la
 import scipy as sp
@@ -81,3 +88,33 @@ def factor_to_cluster(X, cut = 0):
             cluster = sp.delete(cluster, i, 1)
             
     return cluster
+
+def linearmodel_fit(X, y):
+    return la.pinv(X).dot(y)
+
+def target_rotation(X, keys = None):
+    row, col = X.shape
+    if col < 2:
+        return X
+
+    if keys is None:
+        keys = factor_to_cluster(X)
+
+    if keys.shape[1] < 2:
+        return
+
+    U = linearmodel_fit(X, keys)
+    d = np.diag(la.inv(U.T.dot(U)))
+    U = U.dot(np.diag(np.sqrt(d)))
+    z = X.dot(U)
+    Ui = la.inv(U)
+    Phi = Ui.dot(Ui.T)
+
+    return z, U, Phi
+
+def is_ipython():
+    try:
+        __IPYTHON__
+        return True
+    except NameError:
+        return False
