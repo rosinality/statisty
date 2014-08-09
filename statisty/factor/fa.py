@@ -1,3 +1,7 @@
+"""
+This module implements factor analysis with continuous variables.
+Almost all of the code are direct translation from psych package of R.
+"""
 from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
@@ -19,7 +23,7 @@ import pandas as pd
 import statisty as st
 import statisty.utils as utils
 from statisty.utils import RoseTable
-import statisty.factorization.rotation
+import statisty.factor.rotation
 
 import collections
 
@@ -49,9 +53,47 @@ def bootstrap_worker(parameters, no):
 
 class FA(object):
     """
+    Factor Analysis with Continous Variables.
+
+    This model dose most basic factor extractions with assumption of
+    correlation matrix is calculated from continuous variables. If you want to
+    do factor extraction with discrete variables, maybe using PolyFA
+    (not implemented yet) will be better choice.
+
+    Parameters
+    ----------
+    X : array-like, optional
+        raw data array which can calculate correlation coefficients from.
+
+    cov : array-like, optional
+        covariance matrix. you can use this instead of raw data array (X).
+        but if you use this instead of raw data array, you should specify
+        the number of the observations (n_obs).
+
+    cor : array-like, optional
+        correlation matrix. you can use this instead of raw data array (X) or
+        covariance matrix (cov). but if you use this instead of raw data array,
+        you should specify the number of the observations (n_obs).
+
+    n_obs : integer, optional
+        number of the observations. you should specify this when you are using
+        covariance or correlation matrix.
+
+    n_factors : integer
+        total number of the factors to be extracted.
+
+    rotate : string, optional
+        method for factor rotation. currently oblimin rotation supported.
+
+    conf_int : float, optional
+        confidence interval that can be used when calculate factor statistics.
+
+    method : string, optional
+        specify factor extraction methods. currently ml (maximum likelihood)
+        supported.
     """
-    def __init__(self, X = None, cov = None, cor = None, n_obs = None, n_factors = 1,
-                 rotate = None, conf_int = .1, method = 'ml'):
+    def __init__(self, X = None, cov = None, cor = None, n_obs = None,
+                 n_factors = 1, rotate = None, conf_int = .1, method = 'ml'):
         self.iscov = False
         self.pairwise_obs = None
         self.variable_names = None
@@ -105,11 +147,31 @@ class FA(object):
 
         self.method = method
         self.method_fit = {'ml': self._fa_ml}
-        self.method_rotate = {'oblimin': st.factorization.rotation.oblimin}
+        self.method_rotate = {'quartimax': st.factor.rotation.quartimax,
+                              'varimax': st.factor.rotation.varimax,
+                              'bentlerT': st.factor.rotation.bentlerT,
+                              'geominT': st.factor.rotation.geominT,
+                              'bifactorT': st.factor.rotation.bifactorT,
+                              'oblimin': st.factor.rotation.oblimin,
+                              'simplimax': st.factor.rotation.simplimax,
+                              'bentlerQ': st.factor.rotation.bentlerQ,
+                              'geominQ': st.factor.rotation.geominQ,
+                              'bifactorQ': st.factor.rotation.bifactorQ}
 
         self.loadings = None
 
+        self.bootstrapped = False
+
     def fit(self, calc_statistics = True):
+        """
+        Run factor analysis.
+
+        Parameters
+        ----------
+        calc_statistics : boolean, optional
+            If True (default), this function will calculate factor statistics.
+            This option is mainly for the bootstrapping procedure.
+        """
         # self.start = (1 - 0.5 * self.n_factors / self.n_var) / \
         #             np.diag(la.inv(self.cor))
         self.start = np.diag(self.cor) - utils.SMC(self.cor)
@@ -121,14 +183,14 @@ class FA(object):
 
         try:
             rotated_result = self.method_rotate[self.rotate](
-                self.loadings, 0, False, 1e-5, 1000)
+                self.loadings, False, 1e-5, 1000)
             self.isrotated = True
             self.loadings = rotated_result.loadings
             self.Phi = rotated_result.Phi
             sign = self._sort_loadings()
             self.Phi = np.diag(sign).dot(self.Phi).dot(np.diag(sign))
 
-        except KeyError:
+        except (KeyError, TypeError) as e:
             self.isrotated = False
             self.Phi = None
 
@@ -151,7 +213,28 @@ class FA(object):
 
         return self
 
-    def bootstrap(self, niter = 100, njobs = -1, p = .05):
+    def bootstrap(self, niter = 100, p = .05, njobs = 0):
+        """
+        Calculates confidence intervals of factor loadings and
+        interfactor correlations by bootstrapping.
+
+        Parameters
+        ----------
+        niter : integer, optional
+            the number of the bootstrapping replicates.
+
+        p : float, optional
+            size of the 1 - X% confidence interval.
+        
+        njobs : integer, optional
+            number of the cpu cores to be used in bootstrapping.
+            if 0 is specified, all of the cpu cores are used for calculating.
+
+        Notes
+        -----
+        Bootstrapping should be done after model fitting; if model fitting
+        doesn't done, this method automatically calls fit() method.
+        """
         if self.loadings is None:
             self.fit()
         
@@ -167,7 +250,7 @@ class FA(object):
         worker = functools.partial(bootstrap_worker, parameter)
         progress = utils.progress_bar(niter)
         
-        if njobs == -1:
+        if njobs == 0:
             jobs = mp.cpu_count()
 
         else:
@@ -272,14 +355,17 @@ class FA(object):
         self.fit_result = 1 - Xstar2 / X2
         self.fit_off = 1 - Xstar_off / X2_off
         self.sd = np.std(residual, ddof = 1)
-        self.complexity = np.apply_along_axis(lambda x: np.sum(x ** 2), 1, loadings) ** 2 \
-                               / np.apply_along_axis(lambda x: np.sum(x ** 4), 1, loadings)
+        self.complexity = np.apply_along_axis(
+            lambda x: np.sum(x ** 2), 1, loadings) ** 2 \
+            / np.apply_along_axis(lambda x: np.sum(x ** 4), 1, loadings)
         model[np.diag_indices_from(model)] = np.diag(X)
         model = utils.smooth_corrcoef(model)
         X = utils.smooth_corrcoef(X)
         model_inv = la.solve(model, X)
-        self.objective = np.sum(np.diag(model_inv)) - np.log(la.det(model_inv)) - var
-        chisq = self.objective * ((obs - 1) - (2 * var + 5) / 6 - (2 * n_factors) / 3)
+        self.objective = np.sum(np.diag(model_inv)) \
+                         - np.log(la.det(model_inv)) - var
+        chisq = self.objective * ((obs - 1) - (2 * var + 5) / 6 \
+                                  - (2 * n_factors) / 3)
         if chisq < 0:
             self.statistic = 0
 
@@ -293,7 +379,8 @@ class FA(object):
 
         F0 = np.sum(np.diag(X)) - np.log(la.det(X)) - var
         Fm = self.objective
-        Mm = Fm / (var * (var - 1) / 2 - var * n_factors + (n_factors * (n_factors - 1) / 2))
+        Mm = Fm / (var * (var - 1) / 2 - var * n_factors + \
+                   (n_factors * (n_factors - 1) / 2))
         M0 = F0 * 2 / (var * (var - 1))
         nm = (obs - 1) - (2 * var + 5) / 6 - (2 * n_factors) / 3
         self.null_model = F0
@@ -304,13 +391,15 @@ class FA(object):
             self.F0 = 1
 
         if self.dof > 0 and not np.isnan(self.objective):
-            RMSEA = np.sqrt(np.max(self.objective / self.dof - 1 / (obs - 1), 0))
+            RMSEA = np.sqrt(
+                np.max(self.objective / self.dof - 1 / (obs - 1), 0))
             tail = alpha / 2
             chi_max = max(obs, chisq) + 2 * obs
 
             while chi_max > 1:
                 opt_res = sp.optimize.minimize_scalar(
-                    lambda x: (tail - sp.stats.ncx2.cdf(chisq, self.dof, x)) ** 2,
+                    lambda x: \
+                    (tail - sp.stats.ncx2.cdf(chisq, self.dof, x)) ** 2,
                     bracket = (0, chi_max))
 
                 if np.sqrt(opt_res.fun) < tail / 100:
@@ -328,7 +417,8 @@ class FA(object):
 
             while (chi_max > 1):
                 opt_res = sp.optimize.minimize_scalar(
-                    lambda x: (1 - tail - sp.stats.ncx2.cdf(chisq, self.dof, x)) ** 2,
+                    lambda x: \
+                    (1 - tail - sp.stats.ncx2.cdf(chisq, self.dof, x)) ** 2,
                     bracket = (0, chi_max))
 
                 if np.sqrt(opt_res.fun) < tail / 100:
@@ -363,7 +453,8 @@ class FA(object):
                 print('Complex eigenvalues are detected. results are suspect.')
 
             else:
-                eigval[eigval < np.finfo(np.float64).eps] = 100 * np.finfo(np.float64).eps
+                eigval[eigval < np.finfo(np.float64).eps] = 100 * np.finfo(
+                    np.float64).eps
                 X = eigvec.dot(np.diag(eigval)).dot(eigvec.T)
                 np.fill_diagonal(X, 1)
 
@@ -371,7 +462,8 @@ class FA(object):
                     W = la.solve(X, loadings)
 
                 except la.LinAlgError:
-                    print('Failed to calculate the beta weights for factor score estimates')
+                    print('Failed to calculate the beta weights'
+                          ' for factor score estimates')
                     W = np.diag(np.ones((var, )))
 
         R2 = np.diag(W.T.dot(loadings))
@@ -383,7 +475,8 @@ class FA(object):
             R2[R2 <= 0] = np.nan
 
         if np.nanmax(R2) > (1 + np.finfo(np.float64).eps):
-            print('The estimated weights for the factor scores are probably incorrect.'
+            print('The estimated weights for the factor scores'
+                  ' are probably incorrect.'
                   'Try a different factor extraction method.')
 
         self.Rscores = utils.cov_to_cor(W.T.dot(X).dot(W))
@@ -411,10 +504,20 @@ class FA(object):
         pass
 
     def summary(self, loading_threshold = 0):
+        """
+        Prints a summary of the factor analysis results.
+
+        Parameters
+        ----------
+        loading_threshold : integer, optional
+            threshold of loading filtering. if non-zero value spcified,
+            loadings that < abs(loading_threshold) will be skipped and
+            not printed in summary table.
+        """
         var, n_factors = self.loadings.shape
         fac_header = ['']
         var_names = []
-        loadings = self.loadings
+        loadings = self.loadings.copy()
         for i in range(1, n_factors + 1):
             fac_header.append('ML' + str(i))
 
@@ -440,11 +543,21 @@ class FA(object):
         x.char_center_top = '='
         x.title = 'Exploratory Factor Analysis Results'
         x.add_header([''] * 4, align = ['l', 'r', 'l', 'r'])
-        x.add_row(['Number of factors:', n_factors, 'Estimation method:', 'Maximum Likelihood'])
-        x.add_row(['Date:', self.fitted_date, 'Rotation method:', 'Oblimin'])
-        x.add_row(['Time:', self.fitted_time, 'Mean item complexity', '{:10.1f}'.format(np.mean(self.complexity))])
+        x.add_row(['Number of factors:', n_factors,
+                   'Estimation method:', 'Maximum Likelihood'])
+        if self.rotate is None:
+            method_name = 'None'
+        else:
+            method_name = self.rotate[0].upper() + self.rotate[1:]
+        x.add_row(['Date:', self.fitted_date, 'Rotation method:', method_name])
+        x.add_row(['Time:', self.fitted_time,
+                   'Mean item complexity',
+                   '{:10.1f}'.format(np.mean(self.complexity))])
 
-        x.add_title('Test of the hypothesis that ' + str(n_factors) + ' factors are sufficient')
+        x.add_separator()
+        x.add_title('Test of the hypothesis that '
+                    + str(n_factors) +
+                    ' factors are sufficient')
         x.add_header([''] * 6, align = ['l', 'r', 'l', 'r', 'l', 'r'])
         x.add_row(['dof(Null model):', self.null_dof,
                    'Objective function:', "{:10.2f}".format(self.null_model),
@@ -468,7 +581,9 @@ class FA(object):
         temp = ['TLI:', "{:10.3f}".format(self.TLI)]
         try:
             temp.extend(['RMSEA index:', "{:10.3f}".format(self.RMSEA[0]),
-                         '90% Conf. Int.', "{:1.3f} {:1.3f}".format(self.RMSEA[1], self.RMSEA[2])])
+                         '90% Conf. Int.',
+                         "{:1.3f} {:1.3f}".format(
+                             self.RMSEA[1], self.RMSEA[2])])
         except:
             pass
         x.add_row(temp)
@@ -477,11 +592,13 @@ class FA(object):
 
         except:
             temp = []
-        temp.extend(['Fit upon off diagonal:', '{:10.2f}'.format(self.fit_off)])
+        temp.extend(['Fit upon off diagonal:',
+                     '{:10.2f}'.format(self.fit_off)])
         x.add_row(temp)
 
         if self.bootstrapped:
-            x.add_header(load_header, align = ['l'] + ['r'] * (n_factors * 3 + 3))
+            x.add_header(load_header,
+                         align = ['l'] + ['r'] * (n_factors * 3 + 3))
             #x.add_header(load_header, align = ['l'] + ['l', 'r', 'r'] * n_factors + ['r'] * 3)
         else:
             x.add_header(load_header, align = ['l'] + ['r'] * (n_factors + 3))
@@ -501,7 +618,8 @@ class FA(object):
         if self.bootstrapped:
             zip_load = zip(var_names, loadings, h2,
                            self.uniqueness, self.complexity,
-                           self.ci_loadings.lower, self.ci_loadings.upper)
+                           self.ci_loadings.lower.copy(),
+                           self.ci_loadings.upper.copy())
         else:
             zip_load = zip(var_names, loadings, h2,
                            self.uniqueness, self.complexity)
@@ -509,7 +627,8 @@ class FA(object):
         for row in zip_load:
             temp_row = [row[0]]
             row[1][np.abs(row[1]) < loading_threshold] = 0
-            thresholded = ['{:3.2f}'.format(i) if i != 0 else '' for i in row[1]]
+            thresholded = [
+                '{:3.2f}'.format(i) if i != 0 else '' for i in row[1]]
             if self.bootstrapped:
                 row[5][np.abs(row[5]) < loading_threshold] = 0
                 row[6][np.abs(row[6]) < loading_threshold] = 0
@@ -539,12 +658,21 @@ class FA(object):
         else:
             ss_load = np.diag(self.Phi.dot(loadings.T).dot(loadings))
 
-        var_header = [['SS loadings', map(lambda x: "{:3.2f}".format(x), ss_load)],
-                      ['Proportion Var', map(lambda x: "{:3.2f}".format(x), ss_load / var_total)],
-                      ['Cumulative Var', map(lambda x: "{:3.2f}".format(x), np.cumsum(ss_load / var_total))],
-                      ['Proportion Explained', map(lambda x: "{:3.2f}".format(x), ss_load / np.sum(ss_load))],
-                      ['Cumulative Proportion', map(lambda x: "{:3.2f}".format(x),
-                                                    np.cumsum(ss_load / np.sum(ss_load)))]
+        var_header = [['SS loadings',
+                       map(lambda x: "{:3.2f}".format(x),
+                           ss_load)],
+                      ['Proportion Var',
+                       map(lambda x: "{:3.2f}".format(x),
+                           ss_load / var_total)],
+                      ['Cumulative Var',
+                       map(lambda x: "{:3.2f}".format(x),
+                           np.cumsum(ss_load / var_total))],
+                      ['Proportion Explained',
+                       map(lambda x: "{:3.2f}".format(x),
+                           ss_load / np.sum(ss_load))],
+                      ['Cumulative Proportion',
+                       map(lambda x: "{:3.2f}".format(x),
+                           np.cumsum(ss_load / np.sum(ss_load)))]
         ]
 
         for row in var_header:
@@ -571,29 +699,39 @@ class FA(object):
                 corr_header[0] = 'Factor correlations'
 
             if self.bootstrapped:
-                x.add_header(corr_header, align = ['l'] + ['r'] * (n_factors))
+                x.add_header(corr_header,
+                             align = ['l'] + ['r'] * (n_factors))
 
             else:
-                x.add_header(corr_header, align = ['l'] + ['r'] * (n_factors * 3))
+                x.add_header(corr_header,
+                             align = ['l'] + ['r'] * (n_factors * 3))
                 
             for index in range(n_factors):
-                temp_row = [corr_header[index + 1]]
-                correlations = list(map(lambda x: "{:4.2f}".format(x), self.Phi[index, :]))
+                temp_row = [fac_header[index + 1]]
+                correlations = list(map(lambda x: "{:4.2f}".format(x),
+                                        self.Phi[index, :]))
                 if self.bootstrapped and self.ci_rotation is not None:
                     for i, val in enumerate(correlations[:index + 1]):
-                        temp_row.append('{:4.2f}'.format(self.ci_rotation.lower[index, i]))
+                        temp_row.append('{:4.2f}'.format(
+                            self.ci_rotation.lower[index, i]))
                         temp_row.append(val)
-                        temp_row.append('{:4.2f}'.format(self.ci_rotation.upper[index, i]))
+                        temp_row.append('{:4.2f}'.format(
+                            self.ci_rotation.upper[index, i]))
                 else:
                     temp_row.extend(correlations[:index + 1])
                 x.add_row(temp_row)
 
 
         if self.method != 'paf':
-            measure_row = [['Corr. of scores with factors', map(lambda x: "{:3.2f}".format(x), np.sqrt(self.R2))],
-                           ['Multiple R^2 of scores with factors', map(lambda x: "{:3.2f}".format(x), self.R2)],
-                           ['Min. Corr. of possible factor scores', map(lambda x: "{:3.2f}".format(x),
-                                                                        2 * self.R2 - 1)],
+            measure_row = [['Corr. of scores with factors',
+                            map(lambda x: "{:3.2f}".format(x),
+                                np.sqrt(self.R2))],
+                           ['Multiple R^2 of scores with factors',
+                            map(lambda x: "{:3.2f}".format(x),
+                                self.R2)],
+                           ['Min. Corr. of possible factor scores',
+                            map(lambda x: "{:3.2f}".format(x),
+                                2 * self.R2 - 1)],
             ]
             measure_header = fac_header.copy()
             measure_header[0] = 'Measures of factor score adequacy'

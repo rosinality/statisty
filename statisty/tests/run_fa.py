@@ -9,7 +9,7 @@ import sys
 
 import multiprocessing as mp
 
-from statisty.factorization import FA
+from statisty.factor import FA
 
 if __name__ == '__main__':
     df = pd.read_csv('statisty/tests/data/fa_wiscsem.csv')

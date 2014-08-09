@@ -118,3 +118,6 @@ def is_ipython():
         return True
     except NameError:
         return False
+
+def cross_product(X, Y):
+    return X.T.dot(Y)

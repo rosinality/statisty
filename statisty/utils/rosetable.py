@@ -69,6 +69,7 @@ class RoseTable(object):
         self.vertical[index] = char
         
     def __repr__(self):
+        import math
         result = []
 
         widths = []
@@ -133,9 +134,9 @@ class RoseTable(object):
                 try:
                     length = total - len(item['title'])
 
-                    if length % 2 == 1:
-                        length += 1
-                        total += 1
+                    #if length % 2 == 1:
+                    #    length += 1
+                    #    total += 1
 
                     result.append(' ' * (length // 2) + item['title'])
                     continue
