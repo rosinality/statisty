@@ -149,14 +149,14 @@ class FA(object):
         self.method_fit = {'ml': self._fa_ml}
         self.method_rotate = {'quartimax': st.factor.rotation.quartimax,
                               'varimax': st.factor.rotation.varimax,
-                              'bentlerT': st.factor.rotation.bentlerT,
-                              'geominT': st.factor.rotation.geominT,
-                              'bifactorT': st.factor.rotation.bifactorT,
+                              'bentlert': st.factor.rotation.bentlerT,
+                              'geomint': st.factor.rotation.geominT,
+                              'bifactort': st.factor.rotation.bifactorT,
                               'oblimin': st.factor.rotation.oblimin,
                               'simplimax': st.factor.rotation.simplimax,
-                              'bentlerQ': st.factor.rotation.bentlerQ,
-                              'geominQ': st.factor.rotation.geominQ,
-                              'bifactorQ': st.factor.rotation.bifactorQ}
+                              'bentlerq': st.factor.rotation.bentlerQ,
+                              'geominq': st.factor.rotation.geominQ,
+                              'bifactorq': st.factor.rotation.bifactorQ}
 
         self.loadings = None
 
@@ -175,14 +175,23 @@ class FA(object):
         # self.start = (1 - 0.5 * self.n_factors / self.n_var) / \
         #             np.diag(la.inv(self.cor))
         self.start = np.diag(self.cor) - utils.SMC(self.cor)
-        self.method_fit[self.method]()
+
+        if self.method == 'ml':
+            self._fa_ml()
+
+        elif self.method == 'paf':
+            self._fa_paf()
+
+        else:
+            self._fa_residual(self.method)
+        #self.method_fit[self.method]()
 
         self._sort_loadings()
         self.loadings[self.loadings == 0] = 10e-15
         model = self.loadings.dot(self.loadings.T)
 
         try:
-            rotated_result = self.method_rotate[self.rotate](
+            rotated_result = self.method_rotate[self.rotate.lower()](
                 self.loadings, False, 1e-5, 1000)
             self.isrotated = True
             self.loadings = rotated_result.loadings
@@ -190,7 +199,7 @@ class FA(object):
             sign = self._sort_loadings()
             self.Phi = np.diag(sign).dot(self.Phi).dot(np.diag(sign))
 
-        except (KeyError, TypeError) as e:
+        except (KeyError, TypeError, AttributeError) as e:
             self.isrotated = False
             self.Phi = None
 
@@ -543,8 +552,14 @@ class FA(object):
         x.char_center_top = '='
         x.title = 'Exploratory Factor Analysis Results'
         x.add_header([''] * 4, align = ['l', 'r', 'l', 'r'])
+        method_table = {'ml': 'Maximum Likelihood',
+                        'paf': 'Principal Axis',
+                        'minchi': 'Minimum Chi^2',
+                        'gls': 'GLS',
+                        'ols': 'OLS',
+                        'wls': 'WLS'}
         x.add_row(['Number of factors:', n_factors,
-                   'Estimation method:', 'Maximum Likelihood'])
+                   'Estimation method:', method_table[self.method]])
         if self.rotate is None:
             method_name = 'None'
         else:
@@ -756,16 +771,129 @@ class FA(object):
 
         return sign
 
-    def _fa_ml(self):
-        def ml_out(Psi, S, q):
+    def _fa_paf(self, smc = True):
+        cor = self.cor.copy()
+        if smc:
+            np.fill_diagonal(cor, utils.SMC(cor))
+        eig_val1 = la.eigvalsh(self.cor)
+        eig_val1.sort()
+        comm = np.sum(np.diag(cor))
+        err = comm
+        comm_list = []
+        i = 0
+        while err > self.lower:
+            eig_val, eig_vec = utils.eigenh_sorted(cor)
+            if (self.n_factors > 1):
+                loadings = eig_vec[:, :self.n_factors].dot(
+                    np.diag(np.sqrt(eig_val[:self.n_factors])))
+            else:
+                loadings = eig_vec[:, 0] * np.sqrt(eig_val[0])
+
+            model = loadings.dot(loadings.T)
+            new = np.diag(model)
+            comm1 = np.sum(new)
+            np.fill_diagonal(cor, new)
+            err = np.abs(comm - comm1)
+            if np.iscomplex(err):
+                print('Imaginary eigenvalue condition'
+                      ' occurred!')
+                break
+            comm = comm1
+            comm_list.append(comm1)
+            i += 1
+            if i > 1000:
+                print('maximum iteration exceeded')
+                err = 0
+
+        self.loadings = loadings
+
+    def _fa_residual(self, method = 'wls'):
+        def residual_function(Psi, S, n_factors, Sinv, method, obs):
+            S1 = S.copy()
+            np.fill_diagonal(S1, 1 - Psi)
+            if (Sinv is not None):
+                Sdinv = np.diag(1 / np.diag(Sinv))
+            eig_val, eig_vec = utils.eigen_sorted(S1)
+            eig_val[eig_val < np.finfo(np.float64).eps] = \
+                                            100 * np.finfo(
+                                                np.float64).eps * 100
+            if n_factors > 1:
+                loadings = eig_vec[:, :n_factors].dot(
+                    np.diag(np.sqrt(eig_val[:n_factors])))
+
+            else:
+                loadings = eig_vec[:, 0:1] * np.sqrt(eig_val[0])
+
+            model = loadings.dot(loadings.T)
+
+            if method == 'wls':
+                residual = Sdinv.dot((S1 - model) ** 2).dot(Sdinv)
+
+            elif method == 'gls':
+                residual = (Sinv.dot(S1 - model)) ** 2
+                
+            else:
+                residual = (S1 - model) ** 2
+
+                if method == 'minres':
+                    np.fill_diagonal(residual, 0)
+                    
+                else: # minchi
+                    residual *= obs
+                    np.fill_diagonal(residual, 0)
+
+            return np.sum(residual)
+
+        def residual_gradient(Psi, S, n_factors, Sinv, method, obs):
             sc = np.diag(1 / np.sqrt(Psi))
             Sstar = sc.dot(S).dot(sc)
             eig_val, eig_vec = utils.eigenh_sorted(Sstar)
-            L = eig_vec[:, :q]
-            load = L.dot(np.diag(np.sqrt(np.maximum(eig_val[:q] - 1, 0))))
+            L = eig_vec[:, :n_factors]
+            load = L.dot(np.diag(np.sqrt(np.fmax(eig_val[:n_factors] - 1, 0))))
+            load = np.diag(np.sqrt(Psi)).dot(load)
+            g = load.dot(load.T) + np.diag(Psi) - S
 
-            return np.diag(np.sqrt(Psi)).dot(load)
+            return np.diag(g) / Psi ** 2
 
+        def out_wls(Psi, S, q):
+            S1 = S.copy()
+            np.fill_diagonal(S1, 1 - Psi)
+            eig_val, eig_vec = utils.eigen_sorted(S1)
+            L = eig_vec[:, :q].dot(np.diag(np.sqrt(eig_val[:q])))
+
+            return L
+
+        if method == 'wls' or method == 'gls':
+            Sinv = la.inv(self.cor)
+
+        else:
+            Sinv = None
+
+        result = sp.optimize.minimize(residual_function, self.start,
+                                      args = (self.cor, self.n_factors,
+                                              Sinv, method, self.n_obs),
+                                      method = 'L-BFGS-B',
+                                      jac = residual_gradient,
+                                      bounds = [(self.lower, 1)] * self.n_var)
+
+        if method == 'wls' or method == 'gls':
+            self.loadings = out_wls(result.x, self.cor, self.n_factors)
+            
+        else:
+            self.loadings = self._fa_out(result.x, self.cor, self.n_factors)
+            
+        self.parameter = result.x
+
+    def _fa_out(self, Psi, S, q):
+        sc = np.diag(1 / np.sqrt(Psi))
+        Sstar = sc.dot(S).dot(sc)
+        eig_val, eig_vec = utils.eigenh_sorted(Sstar)
+        L = eig_vec[:, :q]
+        load = L.dot(np.diag(np.sqrt(np.maximum(eig_val[:q] - 1, 0))))
+
+        return np.diag(np.sqrt(Psi)).dot(load)
+
+    def _fa_ml(self):
         def ml_function(Psi, S, q):
             sc = np.diag(1 / np.sqrt(Psi))
             Sstar = sc.dot(S).dot(sc)
@@ -793,5 +921,5 @@ class FA(object):
                                       method = 'L-BFGS-B', jac = ml_gradient,
                                       bounds = [(self.lower, 1)] * self.n_var)
 
-        self.loadings = ml_out(result.x, self.cor, self.n_factors)
+        self.loadings = self._fa_out(result.x, self.cor, self.n_factors)
         self.parameter = result.x
